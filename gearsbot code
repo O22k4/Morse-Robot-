@@ -1,0 +1,182 @@
+from ev3dev2.motor import MoveTank, OUTPUT_A, OUTPUT_B
+from ev3dev2.sensor.lego import ColorSensor, GyroSensor
+from ev3dev2.sensor import INPUT_1, INPUT_3
+from time import time, sleep
+
+# ==========================================================
+# SETUP
+# ==========================================================
+tank  = MoveTank(OUTPUT_A, OUTPUT_B)
+color = ColorSensor(INPUT_1)
+gyro  = GyroSensor(INPUT_3)
+
+gyro.reset()
+sleep(2)
+
+# ==========================================================
+# MORSE CODE TABLE
+# ==========================================================
+morse_dict = {
+    ".-":"A","-...":"B","-.-.":"C","-..":"D",".":"E","..-.":"F",
+    "--.":"G","....":"H","..":"I",".---":"J","-.-":"K",".-..":"L",
+    "--":"M","-.":"N","---":"O",".--.":"P","--.-":"Q",".-.":"R",
+    "...":"S","-":"T","..-":"U","...-":"V",".--":"W","-..-":"X",
+    "-.--":"Y","--..":"Z",
+    "-----":"0",".----":"1","..---":"2","...--":"3","....-":"4",
+    ".....":"5","-....":"6","--...":"7","---..":"8","----.":"9"
+}
+
+# ==========================================================
+# DRIVING SETTINGS
+# ==========================================================
+BASE_SPEED = 14
+MAX_SPEED  = 22
+MIN_SPEED  = 6
+
+Kp = 1.0
+Ki = 0.002
+Kd = 2.0
+
+TARGET_ANGLE = 0
+
+# ==========================================================
+# MORSE SETTINGS
+# ==========================================================
+DOT_MAX    = 0.50
+DEBOUNCE   = 0.12
+LETTER_GAP = 0.40
+
+# ==========================================================
+# END TRACK SETTINGS
+# Robot stops if no red detected for this long
+# (increase if your track is longer)
+# ==========================================================
+END_TIMEOUT = 3.0
+
+# ==========================================================
+# STATE VARIABLES
+# ==========================================================
+current_symbol   = ""
+reading_red      = False
+start_red        = 0
+end_red          = 0
+last_symbol_time = time()
+last_red_seen    = time()
+letter_done      = True
+
+# PID state
+integral   = 0
+last_error = 0
+last_time  = time()
+
+# ==========================================================
+# FUNCTIONS
+# ==========================================================
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def stop_robot():
+    tank.off(brake=True)
+    print("END OF TRACK")
+    print("ROBOT STOPPED")
+
+
+def drive_straight():
+    global integral, last_error, last_time
+
+    now = time()
+    dt = now - last_time
+    if dt <= 0:
+        dt = 0.01
+
+    angle = gyro.angle
+    error = TARGET_ANGLE - angle
+
+    integral += error * dt
+    derivative = (error - last_error) / dt
+
+    correction = (Kp * error) + (Ki * integral) + (Kd * derivative)
+
+    left_speed  = clamp(BASE_SPEED + correction, MIN_SPEED, MAX_SPEED)
+    right_speed = clamp(BASE_SPEED - correction, MIN_SPEED, MAX_SPEED)
+
+    tank.on(left_speed, right_speed)
+
+    last_error = error
+    last_time = now
+
+
+def decode_letter():
+    global current_symbol, letter_done
+
+    letter = morse_dict.get(current_symbol, "?")
+    print("LETTER:", letter)
+    print("----------")
+
+    current_symbol = ""
+    letter_done = True
+
+
+# ==========================================================
+# MAIN LOOP
+# ==========================================================
+while True:
+
+    # keep robot straight
+    drive_straight()
+
+    now = time()
+
+    # read colour sensor
+    try:
+        is_red = (color.color == 5)
+    except:
+        is_red = False
+
+    # ======================================================
+    # DETECT RED MARKS
+    # ======================================================
+    if is_red:
+
+        last_red_seen = now
+
+        if not reading_red and (now - end_red) > DEBOUNCE:
+            reading_red = True
+            start_red = now
+            letter_done = False
+
+    else:
+
+        if reading_red:
+            duration = now - start_red
+
+            if duration >= DEBOUNCE:
+
+                if duration < DOT_MAX:
+                    symbol = "."
+                    print("DOT")
+                else:
+                    symbol = "-"
+                    print("DASH")
+
+                current_symbol += symbol
+                last_symbol_time = now
+
+            reading_red = False
+            end_red = now
+
+        # letter completed
+        if current_symbol and not letter_done:
+            if (now - last_symbol_time) > LETTER_GAP:
+                decode_letter()
+
+    # ======================================================
+    # STOP AT END OF TRACK
+    # No red for several seconds = end reached
+    # ======================================================
+    if (now - last_red_seen) > END_TIMEOUT:
+        stop_robot()
+        break
+
+    sleep(0.02)
